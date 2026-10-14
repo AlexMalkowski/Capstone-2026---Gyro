@@ -11,6 +11,7 @@ w = input('Enter flywheel width [mm]: ');
 w = w/1000;
 beta = input('Enter skew angle [degrees]: ');
 n = input('Enter number of gimbals: ');
+max_gimbal_rate = input('Enter max gimbal rate [rad/s]: ');
 rho = 7500; % Flywheel density [kg/m^3]
 omega = u * 2 * pi / 60;
 beta = beta * pi / 180; % Pyramid skew angle [rad]
@@ -34,7 +35,6 @@ end
 
 % Monte Carlo Torque Envelope Sampling
 num_samples = 500000;          % Number of random configurations to test
-max_gimbal_rate = 30;         % Max rate limit [rad/s]
 
 torque_cloud = zeros(3, num_samples);
 
@@ -73,7 +73,7 @@ flywheelMass = rho * pi * radius^2 * w;
 fprintf('Max torque in x is %.2f Nm\n', max(torque_x));
 fprintf('Max torque in y is %.2f Nm\n', max(torque_y));
 fprintf('Max torque in z is %.2f Nm\n', max(torque_z));
-fprintf('Flywheel mass is %d kg \n', flywheelMass)
+fprintf('Mass of all flywheels is %d kg \n', flywheelMass*n)
 
 % Helper Functions
 function h = rotate_h(g, h_0, angle)
