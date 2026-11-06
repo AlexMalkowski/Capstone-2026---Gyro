@@ -1,0 +1,347 @@
+%% cmg_flywheel_opt_v2.m
+% Flywheel sizing for a scissor-pair CMG (constrained optimisation, fmincon)
+%
+%   maximise   peak output torque of one scissor pair
+%   subject to total mass, flywheel stress, gimbal-motor torque,
+%              spin power (optional) and other optional limits
+%
+% Requires: Optimization Toolbox (fmincon, optimoptions). MATLAB R2016b+.
+%
+% HOW TO USE
+%   Section 1  physical inputs and limits      (edit values here)
+%   Section 2  design variables + bounds       (add/remove/fix variables here)
+%   Section 3  optimiser settings
+%   Everything below the sections is the model; the physics lives in ONE
+%   function, cmgModel(), so objective, constraints, plots and the later
+%   control model all use the same equations.
+%
+% Convention (scissor pair): two wheels of equal spin momentum h, opposite
+% spin, gimbal angles +/-delta.  Net momentum  H = 2 h sin(delta)  along the
+% output axis, the cross-axis components cancel.  Output torque magnitude
+%   tau = 2 h cos(delta) * ddelta/dt
+%
+% v2 additions: damping/friction/stiffness table (nominal/lo/hi), steady-state
+% spin loss + spin power (constraint and/or objective penalty), loss
+% sensitivity printout, damping struct in cmg_params.mat.
+%
+% All values are SI.  PLACEHOLDER numbers are marked (!) - replace them.
+
+clear; clc; close all
+rpm = 2*pi/60;   deg = pi/180;
+
+%% 1. INPUTS ---------------------------------------------------------------
+% --- Material (list is in getMaterial() at the bottom) ---
+p.mat       = getMaterial('Steel 4140');
+p.SF        = 2;      % safety factor on yield                          (!)
+p.SCF       = 1.5;      % stress concentration at bore (press fit/keyway) (!)
+p.r_hole    = 0.004;    % [m] shaft-hole radius                           (!)
+p.aspectMax = Inf;      % max t/R: keeps the thin-disc stress formula valid
+
+% --- Architecture and mass budget ---
+p.nPairs     = 1;       % number of scissor pairs (e.g. one per axis)     (!)
+p.m_max      = 1.5;     % [kg] mass budget for ALL pairs                  (!)
+p.m_fixed    = 0.20;    % [kg] mass not tied to a wheel (electronics etc) (!)
+p.m_overhead = @(v) 0.27; % [kg] per wheel: spin motor, bearings, gimbal
+                          % motor, housing share. Can depend on design
+                          % variables, e.g. @(v) 0.05 + 0.8*v.R              (!)
+
+% --- Gimbal axis ---
+p.gimbalRate_max  = 5;          % [rad/s]   max gimbal rate               (!)
+p.gimbalAccel_max = 100;        % [rad/s^2] max gimbal acceleration       (!)
+p.gimbalAngle_max = 60*deg;     % [rad]     operating half-angle          (!)
+p.tau_gimbal_max  = 0.4;       % [N m] gimbal motor torque at the axis   (!)
+p.J_frame         = 1e-5;       % [kg m^2] gimbal frame+motor inertia     (!)
+p.omegaBase_max   = 1.5;        % [rad/s] worst-case head rate about the
+                                %   output axis (loads the gimbal motor)   (!)
+
+% --- Spin power ---
+p.rho_air   = 1.2;      % [kg/m^3] air density around the wheel (lower if
+                        %   housing is evacuated / partially evacuated)    (!)
+p.eta_motor = 0.8;      % [-] spin motor + driver efficiency              (!)
+p.P_max     = Inf;      % [W] max ELECTRICAL spin power, all wheels (Inf = off)
+
+% --- Optional extra limit (Inf = off) ---
+p.KE_max = Inf;                 % [J] max stored energy per wheel (safety)
+
+% --- Damping / friction / stiffness -----------------------------------
+% Order-of-magnitude values for a ~R=40 mm, 100-200 g wheel at ~10k rpm.
+% NOT from datasheets: replace with bearing/motor/gearbox values later.
+% lo/hi give the plausible range for sensitivity runs; dampCase picks which
+% set the optimiser uses.
+%         name        nominal   lo        hi        meaning [units]
+DAMP = {  'b_r',      2e-6,     5e-7,     1e-5      % rotor viscous      [N m s/rad]
+          'tau_c_r',  1e-4,     5e-5,     5e-4      % rotor Coulomb      [N m]
+          'Cm',       0.01,     0.004,    0.025     % windage moment coeff, both faces [-]
+                                                    %   tau_wind = Cm*rho_air*R^5*w^2
+          'b_g',      0.005,    0.001,    0.05      % gimbal viscous     [N m s/rad]
+          'tau_c_g',  0.01,     0.003,    0.03      % gimbal Coulomb     [N m]
+          'k_g',      50,       10,       1000      % gimbal drivetrain stiffness [N m/rad]
+          'zeta_g',   0.05,     0.02,     0.1 };    % flexible-mode damping ratio [-]
+p.damp.nom = cell2struct(DAMP(:,2), DAMP(:,1), 1);
+p.damp.lo  = cell2struct(DAMP(:,3), DAMP(:,1), 1);
+p.damp.hi  = cell2struct(DAMP(:,4), DAMP(:,1), 1);
+p.dampCase = 'nom';     % 'nom' | 'lo' | 'hi'
+
+%% 2. DESIGN VARIABLES -----------------------------------------------------
+% Set free = false to hold a variable at its start value (e.g. fix omega).
+% To add a variable: add a row here and use v.<name> inside cmgModel().
+% Start values must be non-zero (they are used for scaling).
+%        name      start       lower       upper       free?
+DV = {  'R',       0.025,      0.02,      0.03,      true     % [m] radius
+        't',       0.015,      0.01,       0.025,      true     % [m] thickness
+        'omega',   10000*rpm,  5000*rpm,   12000*rpm,  true };  % [rad/s] spin
+
+%% 3. OPTIMISER SETTINGS ---------------------------------------------------
+cfg.nStarts      = 8;     % random restarts (first start = DV start values)
+cfg.seed         = 1;
+cfg.massPenalty  = 1e-3;  % tiny tie-breaker: prefer lighter among equal torque
+cfg.tauRef       = 1;     % [N m] objective scaling
+cfg.powerPenalty = 0;     % objective gets + powerPenalty*P_elec/powerRef.
+cfg.powerRef     = 10;    % [W]  e.g. 0.05 = give up 0.05*tauRef N m of peak
+                          %   torque per 10 W. 0 = power ignored in objective.
+
+%% 4. RUN ------------------------------------------------------------------
+[vopt, out, ~, S] = runOptimisation(p, DV, cfg);
+printReport(vopt, out, p, S);
+printLossSensitivity(vopt, p);
+plotDesignSpace(vopt, S, p);
+
+%% 5. OPTIONAL TRADE STUDY: best torque vs mass budget ---------------------
+runStudy = false;
+if runStudy
+    mBudgets = linspace(0.8, 2.0, 7);
+    tauBest  = nan(size(mBudgets));
+    for i = 1:numel(mBudgets)
+        pp = p;  pp.m_max = mBudgets(i);
+        try
+            [~, oi] = runOptimisation(pp, DV, cfg);
+            tauBest(i) = oi.tau_peak;
+        catch   % infeasible at this budget
+        end
+    end
+    figure('Name','Mass trade study');
+    plot(mBudgets, tauBest, 'o-', 'LineWidth', 1.5); grid on
+    xlabel('Total mass budget [kg]'); ylabel('Best peak torque per pair [N m]');
+end
+
+%% 6. HAND-OFF TO CONTROL MODEL --------------------------------------------
+% Parameters the equations of motion need (see cmgModel for definitions).
+cmg.h             = out.h;                 % [N m s]  spin momentum per wheel
+cmg.Iz            = out.Iz;                % [kg m^2] spin inertia per wheel
+cmg.Jg            = out.J_gimbal;          % [kg m^2] gimbal-axis inertia
+cmg.omega         = vopt.omega;            % [rad/s]
+cmg.R             = vopt.R;                % [m]
+cmg.delta_max     = p.gimbalAngle_max;     % [rad]
+cmg.deltaDot_max  = p.gimbalRate_max;      % [rad/s]
+cmg.deltaDDot_max = p.gimbalAccel_max;     % [rad/s^2]
+cmg.tau_g_max     = p.tau_gimbal_max;      % [N m]
+
+% Damping sets (nominal / lo / hi). c_w is the windage coefficient
+% [N m s^2/rad^2] evaluated at the optimum radius, so the control model can
+% use   Iz*wdot = tau_motor - b_r*w - tau_c_r*sign(w) - c_w*w^2
+for nm = {'nom','lo','hi'}
+    d = p.damp.(nm{1});
+    d.c_w = d.Cm*p.rho_air*vopt.R^5;
+    cmg.damp.(nm{1}) = d;
+end
+cmg.damp.info = ['b_r [N m s/rad], tau_c_r [N m], Cm [-], c_w [N m s^2/rad^2], ' ...
+                 'b_g [N m s/rad], tau_c_g [N m], k_g [N m/rad], zeta_g [-]'];
+save('cmg_params.mat', 'cmg');
+
+%% ========================== LOCAL FUNCTIONS ==============================
+
+function o = cmgModel(v, p)
+% Single source of truth for the physics. v = struct of design variables,
+% p = struct of inputs. Written element-wise so v.R / v.t may be matrices
+% (used for the design-space plot).
+    a = p.r_hole;  b = v.R;  t = v.t;  w = v.omega;
+    rho = p.mat.rho;  nu = p.mat.nu;
+    d = p.damp.(p.dampCase);
+
+    % --- one wheel: solid disc with shaft hole ---
+    o.m_wheel = rho*pi.*(b.^2 - a^2).*t;
+    o.Iz = 0.5*o.m_wheel.*(b.^2 + a^2);                        % spin axis
+    o.It = 0.25*o.m_wheel.*(b.^2 + a^2) + o.m_wheel.*t.^2/12;  % diameter axis
+    o.h  = o.Iz.*w;                                            % N m s
+    o.KE = 0.5*o.Iz.*w.^2;                                     % J
+    o.vTip = w.*b;                                             % m/s
+
+    % --- stress: rotating annular disc, plane stress, max hoop at the bore
+    % sigma = rho w^2/4 [ (3+nu) b^2 + (1-nu) a^2 ]   (times SCF)
+    o.sigma_hoop = p.SCF*rho.*w.^2/4.*((3+nu).*b.^2 + (1-nu)*a^2);
+
+    % --- scissor pair output ---
+    o.H_pair_max     = 2*o.h*sin(p.gimbalAngle_max);           % N m s
+    o.tau_peak       = 2*o.h*p.gimbalRate_max;                 % N m at delta=0
+    o.tau_atMaxAngle = o.tau_peak*cos(p.gimbalAngle_max);      % N m
+
+    % --- gimbal motor load (per gimbal): inertial + gyroscopic reaction
+    o.J_gimbal       = o.It + p.J_frame;
+    o.tau_gimbal_req = o.J_gimbal*p.gimbalAccel_max + o.h*p.omegaBase_max;
+
+    % --- steady-state spin losses (per wheel) and spin power ---
+    o.tau_visc  = d.b_r.*w;                                    % N m
+    o.tau_coul  = d.tau_c_r + 0*w;                             % N m
+    o.tau_wind  = d.Cm*p.rho_air.*b.^5.*w.^2;                  % N m
+    o.tau_loss  = o.tau_visc + o.tau_coul + o.tau_wind;        % N m
+    o.P_mech    = o.tau_loss.*w;                               % W per wheel
+    o.P_elec    = p.nPairs*2*o.P_mech/p.eta_motor;             % W all wheels
+
+    % --- mass ---
+    o.m_total = p.nPairs*2*(o.m_wheel + p.m_overhead(v)) + p.m_fixed;
+
+    % --- constraints, normalised so c <= 0 is feasible; c+1 = demand/capacity
+    o.c.mass   = o.m_total/p.m_max - 1;
+    o.c.stress = o.sigma_hoop/(p.mat.sy/p.SF) - 1;
+    o.c.gimbal = o.tau_gimbal_req/p.tau_gimbal_max - 1;
+    o.c.aspect = t./(p.aspectMax*b) - 1;
+    o.c.KE     = o.KE/p.KE_max - 1;
+    o.c.power  = o.P_elec/p.P_max - 1;
+end
+
+function [vopt, out, exitflag, S] = runOptimisation(p, DV, cfg)
+    S.names = DV(:,1);
+    S.x0    = cell2mat(DV(:,2));
+    S.lb    = cell2mat(DV(:,3));
+    S.ub    = cell2mat(DV(:,4));
+    S.free  = logical(cell2mat(DV(:,5)));
+    S.scale = S.x0;                    % optimiser works on x/x0 ~ O(1)
+    S.p     = p;
+
+    zlb = S.lb(S.free)./S.scale(S.free);
+    zub = S.ub(S.free)./S.scale(S.free);
+    z0  = S.x0(S.free)./S.scale(S.free);
+
+    opts = optimoptions('fmincon', 'Algorithm','sqp', 'Display','off', ...
+        'OptimalityTolerance',1e-9, 'ConstraintTolerance',1e-9, ...
+        'StepTolerance',1e-12);
+
+    rng(cfg.seed);
+    best.f = Inf;
+    for k = 1:cfg.nStarts
+        if k == 1, zs = z0; else, zs = zlb + rand(size(zlb)).*(zub - zlb); end
+        [z, f, flag] = fmincon(@(z) objective(z,S,cfg), zs, [],[],[],[], ...
+                               zlb, zub, @(z) nonlcon(z,S), opts);
+        if flag > 0 && f < best.f - 1e-9
+            best.z = z;  best.f = f;  best.flag = flag;
+        end
+    end
+    if isinf(best.f)
+        error('No feasible design found - loosen limits/bounds (see printReport).');
+    end
+
+    vopt     = z2v(best.z, S);
+    out      = cmgModel(vopt, p);
+    exitflag = best.flag;
+end
+
+function f = objective(z, S, cfg)
+    o = cmgModel(z2v(z,S), S.p);
+    f = -o.tau_peak/cfg.tauRef ...
+        + cfg.massPenalty*o.m_total/S.p.m_max ...
+        + cfg.powerPenalty*o.P_elec/cfg.powerRef;
+end
+
+function [c, ceq] = nonlcon(z, S)
+    o   = cmgModel(z2v(z,S), S.p);
+    c   = cell2mat(struct2cell(o.c));
+    ceq = [];
+end
+
+function v = z2v(z, S)
+% optimiser vector (free, scaled) -> struct of all design variables (SI)
+    x = S.x0;
+    x(S.free) = z(:).*S.scale(S.free);
+    v = cell2struct(num2cell(x(:)), S.names, 1);
+end
+
+function printReport(v, o, p, S)
+    rpm = 2*pi/60;
+    fprintf('\n=== OPTIMUM  (%s) ===\n', p.mat.name);
+    for i = 1:numel(S.names)
+        n = S.names{i};  x = v.(n);  note = '';
+        if ~S.free(i)
+            note = '  [fixed]';
+        elseif abs(x - S.ub(i)) < 1e-6*abs(S.ub(i)), note = '  <-- at UPPER bound';
+        elseif abs(x - S.lb(i)) < 1e-6*abs(S.lb(i)), note = '  <-- at LOWER bound';
+        end
+        fprintf('  %-6s = %10.4g%s\n', n, x, note);
+    end
+    fprintf('  (R = %.1f mm, t = %.1f mm, omega = %.0f rpm)\n', ...
+            v.R*1e3, v.t*1e3, v.omega/rpm);
+
+    fprintf('\nPer wheel : mass %.3f kg | Iz %.3e kg m^2 | h %.4f N m s\n', ...
+            o.m_wheel, o.Iz, o.h);
+    fprintf('            KE %.1f J | tip speed %.1f m/s | hoop stress %.1f MPa\n', ...
+            o.KE, o.vTip, o.sigma_hoop/1e6);
+    fprintf('Spin loss : %.2f mN m total (viscous %.2f | Coulomb %.2f | windage %.2f)\n', ...
+            1e3*o.tau_loss, 1e3*o.tau_visc, 1e3*o.tau_coul, 1e3*o.tau_wind);
+    fprintf('            %.1f W mechanical per wheel | %.1f W electrical, all wheels [%s damping]\n', ...
+            o.P_mech, o.P_elec, p.dampCase);
+    fprintf('Per pair  : peak torque %.3f N m | at %.0f deg %.3f N m | H_max %.4f N m s\n', ...
+            o.tau_peak, p.gimbalAngle_max*180/pi, o.tau_atMaxAngle, o.H_pair_max);
+    fprintf('System    : total mass %.3f kg of %.3f kg\n', o.m_total, p.m_max);
+
+    fprintf('\nConstraint utilisation (1.00 = at limit):\n');
+    names = fieldnames(o.c);
+    for i = 1:numel(names)
+        u = o.c.(names{i}) + 1;
+        flag = ''; if u > 0.99, flag = '  <-- ACTIVE'; end
+        fprintf('  %-7s %6.3f%s\n', names{i}, u, flag);
+    end
+end
+
+function printLossSensitivity(v, p)
+% Spin loss at the optimum design for each damping set (design held fixed).
+    fprintf('\nSpin-loss sensitivity at this design:\n');
+    for nm = {'lo','nom','hi'}
+        pp = p;  pp.dampCase = nm{1};
+        o = cmgModel(v, pp);
+        fprintf('  %-4s  loss torque %6.2f mN m | electrical power (all wheels) %6.1f W\n', ...
+                nm{1}, 1e3*o.tau_loss, o.P_elec);
+    end
+end
+
+function plotDesignSpace(v, S, p)
+% Peak torque over the R-t plane (other variables held at optimum) with
+% each constraint limit drawn as a line. Feasible side contains the star.
+    iR = find(strcmp(S.names,'R'));  it = find(strcmp(S.names,'t'));
+    if isempty(iR) || isempty(it), return; end
+    [RR, TT] = meshgrid(linspace(S.lb(iR),S.ub(iR),150), ...
+                        linspace(S.lb(it),S.ub(it),150));
+    g = v;  g.R = RR;  g.t = TT;
+    o = cmgModel(g, p);
+
+    figure('Name','Design space'); hold on
+    contourf(RR*1e3, TT*1e3, o.tau_peak, 15, 'LineColor','none');
+    cb = colorbar;  cb.Label.String = 'Peak torque per pair [N m]';
+    col = lines(numel(fieldnames(o.c)));
+    names = fieldnames(o.c);  hh = gobjects(0);  lbl = {};
+    for i = 1:numel(names)
+        Z = o.c.(names{i});
+        if max(Z(:)) - min(Z(:)) < eps, continue; end   % constant: skip
+        [~, hc] = contour(RR*1e3, TT*1e3, Z, [0 0], 'LineWidth',2.5, 'Color',col(i,:));
+        hh(end+1) = hc;  lbl{end+1} = names{i}; %#ok<AGROW>
+    end
+    plot(v.R*1e3, v.t*1e3, 'kp', 'MarkerFaceColor','y', 'MarkerSize',14);
+    xlabel('Radius R [mm]'); ylabel('Thickness t [mm]');
+    title(sprintf('Constraint limits at omega = %.0f rpm', v.omega*30/pi));
+    if ~isempty(hh), legend(hh, lbl, 'Location','best'); end
+    box on
+end
+
+function m = getMaterial(name)
+% Typical handbook values - verify against your supplier's datasheet.
+%        name              rho [kg/m^3]  yield [Pa]  Poisson
+    T = { 'Al 6061-T6',     2700,         276e6,      0.33
+          'Al 7075-T6',     2810,         503e6,      0.33
+          'Ti-6Al-4V',      4430,         880e6,      0.34
+          'Steel 4140',     7850,         655e6,      0.29
+          'Brass C360',     8500,         310e6,      0.34
+          'SS 304',         8000,         215e6,      0.29 };
+    idx = find(strcmp(T(:,1), name), 1);
+    if isempty(idx)
+        error('Unknown material "%s". Options: %s', name, strjoin(T(:,1)', ', '));
+    end
+    m = struct('name',T{idx,1}, 'rho',T{idx,2}, 'sy',T{idx,3}, 'nu',T{idx,4});
+end
