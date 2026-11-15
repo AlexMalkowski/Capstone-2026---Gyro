@@ -5,28 +5,34 @@ from pymoo.optimize import minimize
 from pymoo.visualization.scatter import Scatter
 import matplotlib.pyplot as plt
 
+INDEPENDENT = 'NO'
+if INDEPENDENT == 'YES':
+    X = 1
+elif INDEPENDENT == 'NO':
+    X = 2
 RHO = 7850.0                                    # steel, kg/m^3 (swap for your material)
-BETA0 = np.radians(0)
-BETA1, BETA2 = np.radians(20), np.radians(160)  # Gimbal angle range for reference gimbal speed
+BETA0 = np.radians(90)
+BETA1, BETA2 = np.radians(100), np.radians(160)  # Gimbal angle range for reference gimbal speed
 if BETA0 < np.radians(90):
     BETA_MAX = np.radians(90)
 else:
-    BETA_MAX = BETA0
-TAU_HOLD, T_HOLD = 1, 0.4                     # Hold a torque of >= 0.7 Nm for 0.4 s
-BETA_DOT_REF = (BETA2-BETA1)/T_HOLD             # Gimbal speed to hold torque for 0.4 s
+    BETA_MAX = BETA1
+TAU_HOLD, T_HOLD = 0.4, 0.3                     # Hold a torque of >= XX Nm for XX s
+BETA_DOT_REF = (BETA2-BETA1)/T_HOLD             # Gimbal speed to hold torque for T_HOLD s
 SIGMA_ALLOW = 200e6                             # Allowable stress of steel, Pa
-KE_MAX_WHEEL = np.inf                              # Maximum kinetic energy of the wheel, J
+KE_MAX_WHEEL = np.inf                           # Maximum kinetic energy of the wheel, J
 KE_AREA_MAX = np.inf                            # Maximum kinetic energy per unit area of the wheel, J/m^2
 TAU_PEAK_MIN = 0.1                              # Maximum peak torque of the scissor pair, N·m
 T_RIM_MIN, B_MAX, R_MAX = 0.002, 0.026, 0.03    # Minimum rim thickness, maximum web width, maximum outer radius, m
 BETA_DDOT_MAX = 5000                            # Maximum gimbal angular acceleration, rad/s^2
 THETA_DOT_MAX = 20000*np.pi/30                  # Maximum flywheel angular velocity, rad/s
 OMEGA_LIMB = 5.0                                # Limb angular velocity, rad/s
-T_GIMBAL = 0.35                                 # Gimbal torque, N·m
-BETA_DOT_MAX = 350*np.pi/30                     # Max Gimbal motor speed, rad/s
+T_GIMBAL = 0.18                                 # Gimbal torque, N·m
+BETA_DOT_MAX = 567*np.pi/30                     # Max Gimbal motor speed, rad/s
 J_WHEEL_MOTOR = 0.09*0.005**2                   # Flywheel motor inertia in gimbal axis, kg·m^2
 J_GIMBAL_MOTOR = 61*10**-7                      # Gimbal motor inertia, kg·m^2
 NU = 0.3
+N_MAX = 10
 
 def wheel_props(x):
     R, r, B, b, theta_dot, Beta_dot, n, Beta_ddot = x
@@ -48,7 +54,7 @@ class CMG(ElementwiseProblem):
         # 0.0015 r old min
         super().__init__(n_var=8, n_obj=2, n_ieq_constr=11,
                          xl=[0.010, 0.018, 0.005, 0.005, 200, 0.5, 1, 0.1],
-                         xu=[R_MAX, R_MAX, B_MAX, B_MAX, THETA_DOT_MAX, 150, 5, BETA_DDOT_MAX])
+                         xu=[R_MAX, R_MAX, B_MAX, B_MAX, THETA_DOT_MAX, 150, N_MAX, BETA_DDOT_MAX])
         #x= [Outer radius, rim inner radius, rim width, web width, flywheel velocity, gimbal velocity, gear ratio, gimbal acceleration]
         
     def _evaluate(self, x, out, *args, **kwargs):
@@ -63,7 +69,7 @@ class CMG(ElementwiseProblem):
         KE_wheel = 1/4*J*(2*theta_dot**2 + Beta_dot**2)                 # kinetic energy of the scissor pair, J
         KE_area = KE_wheel/(2*np.pi*R*(R+B))                            # kinetic energy per unit area of the scissor pair, J/m^2
         J_min = TAU_HOLD/(2*BETA_DOT_REF*theta_dot*np.sin(BETA2))       # Minimum inertia of flywheel for TAU_HOLD to last T_HOLD seconds at reference gimbal speed
-        T_mg = Beta_ddot*(1.5*(0.5*J+J_WHEEL_MOTOR)/n + J_GIMBAL_MOTOR*n) + J*theta_dot*OMEGA_LIMB/n    # Gimbal motor torque 
+        T_mg = Beta_ddot*(1.5*(X*0.5*J+J_WHEEL_MOTOR)/n + J_GIMBAL_MOTOR*n) + X*J*theta_dot*OMEGA_LIMB/n    # Gimbal motor torque 
         Beta_dot_mg = n*Beta_dot                                        # Gimbal motor speed 
         
         # g <= 0 constraints
@@ -81,7 +87,7 @@ class CMG(ElementwiseProblem):
 
         g = np.array([g_1, g_2, g_3, g_4, g_5, g_6, g_7, g_8, g_9, g_10, g_11])
         
-        out["F"] = [2 * mass, -tau_peak]                          # minimize mass, minimize KE
+        out["F"] = [2 * mass, -tau_peak]                          # minimize mass, maximum torque
         out["G"] = g
 
 res = minimize(CMG(), NSGA2(pop_size=200), ("n_gen", 300), seed=1, verbose=False)
