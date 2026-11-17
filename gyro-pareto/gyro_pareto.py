@@ -9,14 +9,17 @@ INDEPENDENT = 'NO'
 if INDEPENDENT == 'YES':
     X = 1
 elif INDEPENDENT == 'NO':
-    X = 2
+    X = 2                                       # Inertia seen by the motor is double in the non-indepent case
+
 RHO = 7850.0                                    # steel, kg/m^3 (swap for your material)
-BETA0 = np.radians(90)
+BETA0 = np.radians(90)                          # Initial angle for gimbal trajectory  
 BETA1, BETA2 = np.radians(100), np.radians(160)  # Gimbal angle range for reference gimbal speed
+
 if BETA0 < np.radians(90):
     BETA_MAX = np.radians(90)
 else:
     BETA_MAX = BETA1
+
 TAU_HOLD, T_HOLD = 0.4, 0.3                     # Hold a torque of >= XX Nm for XX s
 BETA_DOT_REF = (BETA2-BETA1)/T_HOLD             # Gimbal speed to hold torque for T_HOLD s
 SIGMA_ALLOW = 200e6                             # Allowable stress of steel, Pa
@@ -31,8 +34,8 @@ T_GIMBAL = 0.18                                 # Gimbal torque, N·m
 BETA_DOT_MAX = 567*np.pi/30                     # Max Gimbal motor speed, rad/s
 J_WHEEL_MOTOR = 0.09*0.005**2                   # Flywheel motor inertia in gimbal axis, kg·m^2
 J_GIMBAL_MOTOR = 61*10**-7                      # Gimbal motor inertia, kg·m^2
-NU = 0.3
-N_MAX = 10
+NU = 0.3                                        # Poisson's ratio
+N_MAX = 10                                      # Max gear ratio
 
 def wheel_props(x):
     R, r, B, b, theta_dot, Beta_dot, n, Beta_ddot = x
@@ -62,13 +65,13 @@ class CMG(ElementwiseProblem):
 
         p = wheel_props(x)
         mass, J, sigma = p["mass_wheel"], p["J"], p["sigma"]
-        #mass = np.pi*RHO*B*(R**2-r**2) + np.pi*RHO*b*r**2               # mass of the scissor pair, kg
-        #J = 0.5*np.pi*RHO*B*(R**4-r**4) + 0.5*np.pi*RHO*b*r**4          # inertia of the scissor pair about the gimbal axis, kg·m^2
-        tau_peak = 2 * J* theta_dot * Beta_dot * np.sin(BETA_MAX)                         # peak torque of the scissor pair at 90 degrees, N·m
-        #sigma = RHO*theta_dot**2/4*((1 - 0.3)*r**2 + (3 + 0.3)*R**2)    # peak stress in the flywheel rim, Pa
-        KE_wheel = 1/4*J*(2*theta_dot**2 + Beta_dot**2)                 # kinetic energy of the scissor pair, J
-        KE_area = KE_wheel/(2*np.pi*R*(R+B))                            # kinetic energy per unit area of the scissor pair, J/m^2
-        J_min = TAU_HOLD/(2*BETA_DOT_REF*theta_dot*np.sin(BETA2))       # Minimum inertia of flywheel for TAU_HOLD to last T_HOLD seconds at reference gimbal speed
+        #mass = np.pi*RHO*B*(R**2-r**2) + np.pi*RHO*b*r**2               # mass of the scissor pair, kg -- Now in wheel_pops(x)
+        #J = 0.5*np.pi*RHO*B*(R**4-r**4) + 0.5*np.pi*RHO*b*r**4          # inertia of the scissor pair about the gimbal axis, kg·m^2 -- Now in wheel_pops(x)
+        tau_peak = 2 * J* theta_dot * Beta_dot * np.sin(BETA_MAX)        # peak torque of the scissor pair at 90 degrees, N·m
+        #sigma = RHO*theta_dot**2/4*((1 - 0.3)*r**2 + (3 + 0.3)*R**2)    # peak stress in the flywheel rim, Pa -- Now in wheel_pops(x)
+        KE_wheel = 1/4*J*(2*theta_dot**2 + Beta_dot**2)                  # kinetic energy of the scissor pair, J
+        KE_area = KE_wheel/(2*np.pi*R*(R+B))                             # kinetic energy per unit area of the scissor pair, J/m^2
+        J_min = TAU_HOLD/(2*BETA_DOT_REF*theta_dot*np.sin(BETA2))        # Minimum inertia of flywheel for TAU_HOLD to last T_HOLD seconds at reference gimbal speed
         T_mg = Beta_ddot*(1.5*(X*0.5*J+J_WHEEL_MOTOR)/n + J_GIMBAL_MOTOR*n) + X*J*theta_dot*OMEGA_LIMB/n    # Gimbal motor torque 
         Beta_dot_mg = n*Beta_dot                                        # Gimbal motor speed 
         
