@@ -40,8 +40,7 @@ p.aspectMax = Inf;      % max t/R: keeps the thin-disc stress formula valid
 % --- Architecture and mass budget ---
 p.nPairs     = 1;       % number of scissor pairs (e.g. one per axis)     (!)
 p.m_max      = 1.5;     % [kg] mass budget for ALL pairs                  (!)
-p.m_fixed    = 0.5
-;    % [kg] mass not tied to a wheel (electronics etc) (!)
+p.m_fixed    = 0.5;    % [kg] mass not tied to a wheel (electronics etc) (!)
 p.m_overhead = @(v) 0.25; % [kg] per wheel: spin motor, bearings, gimbal
                           % motor, housing share. Can depend on design
                           % variables, e.g. @(v) 0.05 + 0.8*v.R              (!)
@@ -50,7 +49,7 @@ p.m_overhead = @(v) 0.25; % [kg] per wheel: spin motor, bearings, gimbal
 p.gimbalRate_max  = 5;          % [rad/s]   max gimbal rate               (!)
 p.gimbalAccel_max = 100;        % [rad/s^2] max gimbal acceleration       (!)
 p.gimbalAngle_max = 60*deg;     % [rad]     operating half-angle          (!)
-p.tau_gimbal_max  = 0.4;       % [N m] gimbal motor torque at the axis   (!)
+p.tau_gimbal_max  = 0.3;       % [N m] gimbal motor torque at the axis   (!)
 p.J_frame         = 1e-5;       % [kg m^2] gimbal frame+motor inertia     (!)
 p.omegaBase_max   = 1.5;        % [rad/s] worst-case head rate about the
                                 %   output axis (loads the gimbal motor)   (!)
@@ -90,7 +89,7 @@ p.dampCase = 'nom';     % 'nom' | 'lo' | 'hi'
 %        name      start       lower       upper       free?
 DV = {  'R',       0.025,      0.02,      0.03,      true     % [m] radius
         't',       0.015,      0.01,       0.05,      true     % [m] thickness
-        'omega',   10000*rpm,  5000*rpm,   15000*rpm,  true };  % [rad/s] spin
+        'omega',   10000*rpm,  5000*rpm,   12000*rpm,  true };  % [rad/s] spin
 
 %% 3. OPTIMISER SETTINGS ---------------------------------------------------
 cfg.nStarts      = 8;     % random restarts (first start = DV start values)
